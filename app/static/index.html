@@ -11,14 +11,14 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="工作区">
-      <div class="brand-lockup"><div class="brand-mark" aria-hidden="true">G</div><div><strong>Guarded Lead</strong><span>Agent console</span></div></div>
+      <div class="brand-lockup"><div class="brand-mark" aria-hidden="true">G</div><div><strong>Guarded Lead</strong><span>Agent console</span></div><button class="sidebar-close" id="sidebar-close" type="button" aria-label="关闭工作区">×</button></div>
       <button class="new-chat" id="new-chat" type="button"><span class="button-glyph" aria-hidden="true">＋</span><span>新建会话</span></button>
       <div class="sidebar-section"><div class="section-label">当前客户</div><label class="field-label" for="customer-id">Customer ID</label><div class="input-with-action"><input id="customer-id" maxlength="128" autocomplete="off" /><button id="load-customer" class="icon-button" type="button" title="加载客户" aria-label="加载客户">↗</button></div></div>
       <div class="sidebar-section sidebar-status"><div class="section-label">运行状态</div><div class="health-row"><span class="status-dot" id="health-dot"></span><span id="health-label">检查连接中</span></div><div class="health-meta" id="health-meta">API /health</div></div>
       <div class="sidebar-bottom"><button class="settings-trigger" id="settings-trigger" type="button"><span class="button-glyph" aria-hidden="true">⚙</span><span>人工凭据</span><span class="settings-state" id="credential-state">未配置</span></button><div class="sidebar-note">v0.1 · local operator workspace</div></div>
     </aside>
     <main class="workspace">
-      <header class="topbar"><div class="conversation-title"><div class="eyebrow">LEAD QUALIFICATION / LIVE</div><div class="title-line"><h1 id="customer-title">demo-customer</h1><span class="session-badge active" id="session-badge">ACTIVE</span></div></div><div class="topbar-actions"><button class="quiet-button" id="refresh-session" type="button" title="刷新会话状态"><span class="button-glyph" aria-hidden="true">⟳</span><span>刷新</span></button><button class="primary-button" id="reactivate" type="button" disabled><span class="button-glyph" aria-hidden="true">↺</span><span>恢复会话</span></button></div></header>
+      <header class="topbar"><button class="mobile-menu" id="mobile-menu" type="button" aria-label="打开工作区" aria-expanded="false">☰</button><div class="conversation-title"><div class="eyebrow">LEAD QUALIFICATION / LIVE</div><div class="title-line"><h1 id="customer-title">demo-customer</h1><span class="session-badge active" id="session-badge">ACTIVE</span></div></div><div class="topbar-actions"><button class="quiet-button" id="refresh-session" type="button" title="刷新会话状态"><span class="button-glyph" aria-hidden="true">⟳</span><span>刷新</span></button><button class="primary-button" id="reactivate" type="button" disabled><span class="button-glyph" aria-hidden="true">↺</span><span>恢复会话</span></button></div></header>
       <section class="chat-layout">
         <div class="chat-column">
           <div class="conversation-strip"><div><span class="strip-label">Conversation</span><span class="strip-value" id="message-count">0 messages</span></div><div class="strip-id" id="trace-label">等待首条消息</div></div>
@@ -29,6 +29,7 @@
       </section>
     </main>
   </div>
+  <button class="sidebar-backdrop" id="sidebar-backdrop" type="button" aria-label="关闭工作区"></button>
   <dialog class="settings-dialog" id="settings-dialog"><form method="dialog" class="settings-form" id="settings-form"><div class="dialog-head"><div><div class="eyebrow">OPERATOR ACCESS</div><h2>人工凭据</h2></div><button class="close-button" value="cancel" aria-label="关闭">×</button></div><p class="dialog-copy">用于读取会话状态、历史消息和执行人工恢复。凭据只保存在当前浏览器会话。</p><label class="field-label" for="actor-id">Actor ID</label><input id="actor-id" autocomplete="username" placeholder="例如 agent-01" /><label class="field-label" for="actor-role">Role</label><select id="actor-role"><option value="human_agent">human_agent</option><option value="admin">admin</option></select><label class="field-label" for="human-token">Human token</label><input id="human-token" type="password" autocomplete="current-password" placeholder="HUMAN_REACTIVATE_TOKEN" /><div class="dialog-actions"><button class="quiet-button" value="cancel">取消</button><button class="primary-button" id="save-credentials" value="default">保存并加载</button></div></form></dialog>
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
   <script src="/assets/app.js" defer></script>

@@ -63,7 +63,12 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"ok": True, "llm_configured": getattr(llm, "configured", True)}
+        is_demo = isinstance(llm, DemoLLM)
+        return {
+            "ok": True,
+            "provider": "demo" if is_demo else "gemini",
+            "llm_configured": True if is_demo else getattr(llm, "configured", False),
+        }
 
     @app.post("/sessions/{customer_id}/messages")
     def message(customer_id: str, request: MessageRequest):

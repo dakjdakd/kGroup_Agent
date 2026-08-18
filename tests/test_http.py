@@ -57,3 +57,9 @@ def test_frontend_and_history_endpoint_are_available(monkeypatch):
     response = client.get("/sessions/c1/history", headers={"X-Actor-Role": "human_agent", "X-Human-Token": "test-token"})
     assert response.status_code == 200
     assert response.json()["messages"] == []
+
+
+def test_demo_web_provider_is_reported_as_demo(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "demo")
+    client = TestClient(create_app())
+    assert client.get("/health").json() == {"ok": True, "provider": "demo", "llm_configured": True}
