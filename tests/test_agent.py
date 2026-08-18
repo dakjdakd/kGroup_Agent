@@ -134,6 +134,52 @@ def test_llm_failure_marks_message_retryable():
     assert result.action == "reply"
 
 
+def test_failed_abnormal_message_does_not_increment_streak_twice():
+    class FailingDraftOnce(QueueLLM):
+        def __init__(self):
+            super().__init__([decision(Intent.OFF_TOPIC), decision(Intent.OFF_TOPIC)])
+            self.fail = True
+
+        def draft_reply(self, message, decision, safe=False):
+            if self.fail:
+                self.fail = False
+                raise LLMError("temporary draft failure")
+            return "公开信息回复"
+
+    service = ConversationService(SQLiteStore(":memory:"), FailingDraftOnce())
+    import pytest
+    with pytest.raises(LLMError):
+        service.handle_message("c1", "abnormal-retry", "偏题")
+    result = service.handle_message("c1", "abnormal-retry", "偏题")
+    assert result.action == "reply"
+    assert result.abnormal_streak == 1
+    assert service.store.get_session("c1").status is SessionStatus.ACTIVE
+
+
+def test_expired_claim_fences_old_worker():
+    store = SQLiteStore(":memory:")
+    first = store.claim_message("m1", "c1", "hello", processing_timeout=0)
+    second = store.claim_message("m1", "c1", "hello", processing_timeout=0)
+    assert first.claim_token and second.claim_token and first.claim_token != second.claim_token
+    assert store.mark_message_completed("c1", "m1", first.claim_token) is False
+    assert store.mark_message_completed("c1", "m1", second.claim_token) is True
+
+
+def test_provider_failure_is_not_recorded_as_outbound():
+    class RejectingProvider:
+        def send(self, customer_id, text, idempotency_key):
+            return False
+
+    store = SQLiteStore(":memory:")
+    gateway = ActionGateway(store, outbound_provider=RejectingProvider())
+    service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED)]), gateway=gateway)
+    result = service.handle_message("c1", "provider-fail", "你好")
+    assert result.action == "schedule_followup"
+    assert store.get_history("c1") == [{"role": "user", "text": "你好"}]
+    outbox = store._conn.execute("SELECT status FROM outbox").fetchall()
+    assert [row[0] for row in outbox] == ["failed"]
+
+
 def test_low_confidence_rejection_does_not_close_session():
     store = SQLiteStore(":memory:")
     low = IntentDecision(intent=Intent.EXPLICITLY_REJECTED, unhappy=False, confidence=0.1, reason_code="uncertain", risk_flags=[ ], action_candidate=ActionType.MARK_NOT_INTERESTED)

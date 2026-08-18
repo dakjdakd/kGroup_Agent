@@ -4,7 +4,7 @@
 
 ```text
 pytest -q tests/test_adversarial.py -vv
-5 passed in 0.33s
+5 passed
 ```
 
 ## 1. 越权完成指令
@@ -42,3 +42,6 @@ pytest -q tests/test_adversarial.py -vv
 - `message_id` 现在是 `(customer_id, message_id)` 复合幂等键；跨客户复用不会重放别人的事件。
 - LLM 超时/非法输出会把消息标记为 `failed`，同一消息在后续请求中可重新领取；`test_llm_failure_marks_message_retryable` PASS。
 - 低置信度 `explicitly_rejected` 会变为 `schedule_followup`，不会直接关闭会话。
+- 失败重试会复用已保存的分类结果，同一异常消息只对 `abnormal_streak` 贡献一次。
+- 过期处理租约由 claim token fencing；旧 worker 的完成写入会返回失败，不能覆盖新 worker。
+- outbound provider 拒绝时只写入 `outbox.status=failed`，不会把失败误记成历史 outbound 消息；同一动作使用稳定 `action_id`。

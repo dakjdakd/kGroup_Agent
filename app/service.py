@@ -85,22 +85,31 @@ class ConversationService:
                         action_id, customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
                         {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak},
                     )
-                    self.store.mark_message_completed(customer_id, message_id)
+                    self.store.mark_message_completed(customer_id, message_id, claim.claim_token)
                     return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action="silent", reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="terminal_session_silent")
 
-                decision = self.llm.classify(text, self.store.get_history(customer_id))
-                session = self.store.apply_abnormal_signal(customer_id, is_abnormal(decision))
+                if not claim.claim_token:
+                    raise LLMError("message claim token missing")
+                if claim.decision_json:
+                    from .domain import IntentDecision
+                    decision = IntentDecision.model_validate(json.loads(claim.decision_json))
+                else:
+                    decision = self.llm.classify(text, self.store.get_history(customer_id))
+                session = self.store.save_decision_once(
+                    customer_id, message_id, claim.claim_token,
+                    decision.model_dump_json(), is_abnormal(decision),
+                )
                 if session.status is not SessionStatus.ACTIVE:
                     self.store.add_event(
                         str(uuid.uuid4()), customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
                         {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak, "intent": decision.intent.value, "unhappy": decision.unhappy, "confidence": decision.confidence},
                     )
-                    self.store.mark_message_completed(customer_id, message_id)
+                    self.store.mark_message_completed(customer_id, message_id, claim.claim_token)
                     return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason="terminal_session_silent")
                 policy = self.policy.decide(session, decision)
                 if policy.action is None:
                     self.store.add_event(str(uuid.uuid4()), customer_id, message_id, "silent", "executed", policy.reason, trace_id, {"final_action": "silent", "intent": decision.intent.value, "confidence": decision.confidence})
-                    self.store.mark_message_completed(customer_id, message_id)
+                    self.store.mark_message_completed(customer_id, message_id, claim.claim_token)
                     return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason=policy.reason)
 
                 reply = None
@@ -114,14 +123,16 @@ class ConversationService:
                     reply,
                     policy.reason,
                     {"intent": decision.intent.value, "unhappy": decision.unhappy, "confidence": decision.confidence, "risk_flags": [flag.value for flag in decision.risk_flags]},
+                    claim_token=claim.claim_token,
                 )
-                self.store.mark_message_completed(customer_id, message_id)
+                if not self.store.mark_message_completed(customer_id, message_id, claim.claim_token):
+                    raise LLMError("message claim lost before completion")
                 return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
             except Exception as exc:
-                self.store.mark_message_failed(customer_id, message_id, str(exc))
+                self.store.mark_message_failed(customer_id, message_id, str(exc), claim.claim_token)
                 if isinstance(exc, LLMError):
                     raise
-                raise LLMError(f"conversation processing failed: {exc}") from exc
+                raise
 
     def reactivate(self, customer_id: str, actor_id: str, actor_role: str) -> SessionStatus:
         self._validate_identifier(customer_id, "customer_id")
@@ -131,10 +142,10 @@ class ConversationService:
         with self._customer_lock(customer_id):
             session = self.store.get_session(customer_id)
             previous = session.status
-            session.status = SessionStatus.ACTIVE
-            session.abnormal_streak = 0
-            session.version += 1
-            self.store.save_session(session)
+            updated = self.store.reactivate_session(customer_id, session.version)
+            if updated is None:
+                raise RuntimeError("session changed during reactivation; retry")
+            session = updated
             trace_id = str(uuid.uuid4())
             self.store.add_event(
                 str(uuid.uuid4()), customer_id, None, "human_reactivate", "executed", "controlled_human_reactivation", trace_id,

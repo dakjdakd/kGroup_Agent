@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import os
 import uuid
 from pathlib import Path
@@ -34,7 +35,9 @@ _load_dotenv()
 
 
 class MessageRequest(BaseModel):
-    message_id: str | None = None
+    # The upstream channel must provide a stable id; generating one server-side
+    # would turn a client retry into a second business message.
+    message_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=5000)
 
 
@@ -53,7 +56,7 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
     @app.post("/sessions/{customer_id}/messages")
     def message(customer_id: str, request: MessageRequest):
         try:
-            state = workflow.invoke({"customer_id": customer_id, "message_id": request.message_id or str(uuid.uuid4()), "text": request.text})
+            state = workflow.invoke({"customer_id": customer_id, "message_id": request.message_id, "text": request.text})
             return state["result"]
         except LLMError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -70,7 +73,7 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
         configured_token = os.getenv("HUMAN_REACTIVATE_TOKEN", "")
         if not configured_token or not x_actor_id or not x_actor_role or not x_human_token:
             raise HTTPException(status_code=401, detail="human actor credentials are required")
-        if x_human_token != configured_token:
+        if not hmac.compare_digest(x_human_token, configured_token):
             raise HTTPException(status_code=403, detail="invalid human actor token")
         try:
             status = service.reactivate(customer_id, x_actor_id, x_actor_role)
@@ -81,7 +84,16 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
         return {"customer_id": customer_id, "status": status.value, "actor_id": x_actor_id}
 
     @app.get("/sessions/{customer_id}")
-    def session(customer_id: str):
+    def session(
+        customer_id: str,
+        x_actor_role: str | None = Header(default=None, alias="X-Actor-Role"),
+        x_human_token: str | None = Header(default=None, alias="X-Human-Token"),
+    ):
+        configured_token = os.getenv("HUMAN_REACTIVATE_TOKEN", "")
+        if not configured_token or x_actor_role not in {"human_agent", "admin"} or not x_human_token:
+            raise HTTPException(status_code=401, detail="human actor credentials are required")
+        if not hmac.compare_digest(x_human_token, configured_token):
+            raise HTTPException(status_code=403, detail="invalid human actor token")
         current = store.get_session(customer_id)
         return {"customer_id": customer_id, "status": current.status.value, "abnormal_streak": current.abnormal_streak, "version": current.version, "last_outbound_at": current.last_outbound_at}
 

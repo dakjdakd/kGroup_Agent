@@ -48,7 +48,13 @@ class GeminiClient:
             if not isinstance(generated, str) or not generated.strip():
                 raise ValueError("empty Gemini text response")
             return generated
-        except Exception as exc:
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            except Exception:
+                detail = str(exc)
+            raise LLMError(f"Gemini HTTP {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             # Keep every provider/network/shape failure on the retryable LLM boundary.
             raise LLMError(f"Gemini request failed: {exc}") from exc
 

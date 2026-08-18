@@ -14,7 +14,7 @@ SAFE_REPLY = "我可以继续介绍公开的产品信息。如果你有具体需
 
 
 class OutboundProvider(Protocol):
-    """Provider boundary for a real IM/CRM connector; the demo uses a local outbox."""
+    """Provider boundary for a real IM/CRM connector."""
 
     def send(self, customer_id: str, text: str, idempotency_key: str) -> bool: ...
 
@@ -24,7 +24,7 @@ class SQLiteOutboxProvider:
         self.store = store
 
     def send(self, customer_id: str, text: str, idempotency_key: str) -> bool:
-        return self.store.add_message(idempotency_key, customer_id, "outbound", text)
+        return self.store.record_outbound(idempotency_key, customer_id, text)
 
 
 class ReplyValidator:
@@ -60,9 +60,12 @@ class ActionGateway:
         reply: str | None = None,
         reason: str = "",
         metadata: dict[str, Any] | None = None,
+        claim_token: str | None = None,
     ) -> tuple[str, str | None, bool]:
-        action_id = str(uuid.uuid4())
+        action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"guarded-lead:{session.customer_id}:{message_id}:action"))
         metadata = metadata or {}
+        if claim_token is not None and not self.store.claim_is_valid(session.customer_id, message_id, claim_token):
+            return "silent", None, False
         try:
             action = ActionType(action)
         except (TypeError, ValueError):
@@ -80,12 +83,18 @@ class ActionGateway:
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "sliding_window_rate_limit", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": True})
                 return "schedule_followup", None, True
             sent_at = time.time()
-            if not self.store.commit_reply(session.customer_id, sent_at):
-                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_before_send", trace_id, {**metadata, "final_action": "silent"})
-                return "silent", None, False
-            if not self.outbound_provider.send(session.customer_id, reply, action_id):
+            try:
+                accepted = self.outbound_provider.send(session.customer_id, reply, action_id)
+            except Exception as exc:
+                accepted = False
+                self.store.record_outbound_failure(action_id, session.customer_id, reply, str(exc))
+            if not accepted:
+                self.store.record_outbound_failure(action_id, session.customer_id, reply, "provider_rejected")
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "outbound_provider_rejected", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": False})
                 return "schedule_followup", None, False
+            if not self.store.commit_reply(session.customer_id, sent_at):
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_after_send", trace_id, {**metadata, "final_action": "silent"})
+                return "silent", None, False
             session.last_outbound_at = sent_at
             session.version += 1
             self.store.add_event(
