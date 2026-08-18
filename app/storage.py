@@ -21,6 +21,8 @@ class MessageClaim:
 
 
 class SQLiteStore:
+    SCHEMA_VERSION = 2
+
     def __init__(self, path: str = "data/agent.db") -> None:
         self.path = path
         if path != ":memory:":
@@ -61,6 +63,7 @@ class SQLiteStore:
         )
         self._migrate_messages_table_if_needed()
         self._ensure_message_columns()
+        self._set_schema_version()
         self._conn.commit()
 
     def _migrate_messages_table_if_needed(self) -> None:
@@ -97,6 +100,13 @@ class SQLiteStore:
         for name, definition in (("claim_token", "TEXT"), ("decision_json", "TEXT"), ("abnormal_applied", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
+
+    def _set_schema_version(self) -> None:
+        """Keep a monotonic SQLite schema marker for future migrations."""
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if version < self.SCHEMA_VERSION:
+            self._conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+
     def get_session(self, customer_id: str) -> Session:
         with self._lock:
             row = self._conn.execute("SELECT * FROM sessions WHERE customer_id = ?", (customer_id,)).fetchone()

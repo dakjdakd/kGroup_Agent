@@ -118,6 +118,7 @@ docs/               threat model 与攻击场景
 - `ActionGateway` 当前把通过策略和限流的回复写入 SQLite `outbox`：本地 provider 会标记为 `accepted`，失败会标记为 `failed`；它不是第三方 IM 的投递确认。接入真实平台时应实现带稳定 `action_id` 幂等键的 provider、`pending/sending/sent/retryable` worker 和发送状态回调。
 - claim token 是消息处理租约的 fencing token；租约过期后旧 worker 的完成/失败写入会被拒绝。跨进程部署仍应使用 PostgreSQL/Redis 等具备明确租约和队列能力的基础设施。
 - 消息采用 `(customer_id, message_id)` 幂等键，并记录 `processing/failed/completed` 状态；LLM 超时或非法输出会释放为可重试消息，避免永久卡死。
+- 服务层和 HTTP 层都限制客户文本不超过 5000 字符，ID 不超过 128 字符且禁止控制字符；SQLite 使用 `PRAGMA user_version` 标记当前 schema 版本。
 - 低于 0.6 置信度的 `explicitly_rejected` 不会直接关闭客户，会降级为 `schedule_followup`。
 - SQLite 适合本地/小规模验证，多实例生产应替换为 PostgreSQL/Redis，但保留原子状态和最终动作网关。
 - 真实 CRM/IM、定时任务、RAG 和 OpenTelemetry/Langfuse 尚未接入，均不能绕过现有安全边界。

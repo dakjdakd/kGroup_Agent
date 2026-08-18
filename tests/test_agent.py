@@ -237,3 +237,16 @@ def test_reply_guardrail_downgrades_sensitive_draft():
     assert result.action == "schedule_followup"
     assert result.reply is None
     assert result.rate_limited is False
+
+
+def test_service_rejects_oversized_text_before_llm_call():
+    store = SQLiteStore(":memory:")
+    service = ConversationService(store, DemoLLM())
+    import pytest
+    with pytest.raises(ValueError, match="5000"):
+        service.handle_message("c1", "large", "x" * 5001)
+
+
+def test_storage_records_schema_version():
+    store = SQLiteStore(":memory:")
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SQLiteStore.SCHEMA_VERSION

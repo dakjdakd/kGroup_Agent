@@ -48,6 +48,8 @@ class ConversationService:
         self._validate_identifier(message_id, "message_id")
         if not text or not text.strip():
             raise ValueError("text must be non-empty")
+        if len(text) > 5000:
+            raise ValueError("text must be at most 5000 characters")
         with self._customer_lock(customer_id):
             trace_id = str(uuid.uuid4())
             session = self.store.get_session(customer_id)

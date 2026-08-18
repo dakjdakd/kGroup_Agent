@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 import re
+import unicodedata
 from typing import Any, Protocol
 
 from .domain import ActionType, Session, SessionStatus, can_transition
@@ -29,7 +30,8 @@ class SQLiteOutboxProvider:
 
 class ReplyValidator:
     def validate(self, text: str) -> bool:
-        lowered = text.casefold()
+        lowered = unicodedata.normalize("NFKC", text).casefold()
+        compact = re.sub(r"\s+", "", lowered)
         forbidden = (
             "api_key", "system prompt", "developer message", "internal policy", "price floor",
             "系统提示词", "内部规则", "价格底线", "secret", "密钥",
@@ -37,7 +39,7 @@ class ReplyValidator:
         return (
             bool(text.strip())
             and len(text) <= 2000
-            and not any(token in lowered for token in forbidden)
+            and not any(token in lowered or token.replace(" ", "") in compact for token in forbidden)
             and not re.search(r"(?:system|developer)\s*(?:prompt|message)|内部\s*(?:规则|提示)", lowered)
         )
 
