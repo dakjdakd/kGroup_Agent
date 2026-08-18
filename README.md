@@ -94,7 +94,7 @@ pytest -q
 python -m compileall -q app tests
 ```
 
-测试覆盖状态升级与静默、正常消息重置、滑动窗口边界、并发限流、跨客户 `message_id` 隔离、LLM 失败重试、失败异常消息不重复计数、过期 claim fencing、provider 失败不伪造 outbound、低置信度拒绝、对话历史、未知动作拒绝、输出泄露降级、人工重新激活和跨连接 SQLite 原子写入。
+测试覆盖状态升级与静默、正常消息重置、滑动窗口边界、并发限流、8 个真实 OS 进程竞争同一消息 claim（1 次 claimed、7 次 processing）、跨客户 `message_id` 隔离、LLM 失败重试、失败异常消息不重复计数、过期 claim fencing、provider 失败不伪造 outbound、低置信度拒绝、对话历史、未知动作拒绝、输出泄露降级、人工重新激活和跨连接 SQLite 原子写入。
 
 ## 代码结构
 

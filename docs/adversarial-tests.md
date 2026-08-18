@@ -45,3 +45,4 @@ pytest -q tests/test_adversarial.py -vv
 - 失败重试会复用已保存的分类结果，同一异常消息只对 `abnormal_streak` 贡献一次。
 - 过期处理租约由 claim token fencing；旧 worker 的完成写入会返回失败，不能覆盖新 worker。
 - outbound provider 拒绝时只写入 `outbox.status=failed`，不会把失败误记成历史 outbound 消息；同一动作使用稳定 `action_id`。
+- `tests/test_rate_limit.py::test_message_claim_is_unique_across_real_processes` 使用 8 个独立 OS 进程和 SQLite 连接竞争同一消息，实际结果为 `1 claimed / 7 processing`，没有重复领取。
