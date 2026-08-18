@@ -54,6 +54,15 @@ python -m app.main --demo
 
 离线 `DemoLLM` 只验证流程和安全边界，不代表真实模型分类效果。
 
+也可以在浏览器中离线验收完整 Web Console（不会调用 Gemini）：
+
+```powershell
+$env:LLM_PROVIDER = "demo"
+uvicorn app.main:app --reload
+```
+
+然后打开 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)。关闭终端后该环境变量失效；生产或真实 API 测试保持默认 `gemini` 即可。
+
 ## HTTP API
 
 ```text

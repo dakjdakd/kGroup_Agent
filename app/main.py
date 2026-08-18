@@ -45,7 +45,11 @@ class MessageRequest(BaseModel):
 
 def create_app(service: ConversationService | None = None) -> FastAPI:
     store = service.store if service else SQLiteStore(os.getenv("DATABASE_PATH", "data/agent.db"))
-    llm = service.llm if service else GeminiClient()
+    if service:
+        llm = service.llm
+    else:
+        provider = os.getenv("LLM_PROVIDER", "gemini").strip().casefold()
+        llm = DemoLLM() if provider == "demo" else GeminiClient()
     service = service or ConversationService(store, llm)
     workflow = build_graph(service)
     app = FastAPI(title="Guarded Lead Agent", version="0.1.0")
