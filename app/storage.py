@@ -359,6 +359,24 @@ class SQLiteStore:
             for row in reversed(rows)
         ]
 
+    def get_history_records(self, customer_id: str, limit: int = 40) -> list[dict[str, Any]]:
+        """Return display-safe conversation records for an authenticated operator UI."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT message_id, direction, content, created_at FROM messages "
+                "WHERE customer_id=? ORDER BY rowid DESC LIMIT ?",
+                (customer_id, limit),
+            ).fetchall()
+        return [
+            {
+                "message_id": row["message_id"],
+                "role": "user" if row["direction"] == "inbound" else "assistant",
+                "text": row["content"],
+                "created_at": row["created_at"],
+            }
+            for row in reversed(rows)
+        ]
+
     def add_event(self, action_id: str, customer_id: str, message_id: str | None, action_type: str, result: str, reason: str, trace_id: str, payload: dict[str, Any] | None = None) -> None:
         with self._lock:
             self._conn.execute("INSERT OR REPLACE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (action_id, customer_id, message_id, action_type, result, reason, trace_id, json.dumps(payload or {}), time.time()))

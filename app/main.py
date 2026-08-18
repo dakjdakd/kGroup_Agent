@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .domain import SessionStatus
@@ -48,6 +50,12 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
     workflow = build_graph(service)
     app = FastAPI(title="Guarded Lead Agent", version="0.1.0")
     app.state.service = service
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    def frontend():
+        return FileResponse(static_dir / "index.html")
 
     @app.get("/health")
     def health():
@@ -96,6 +104,20 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="invalid human actor token")
         current = store.get_session(customer_id)
         return {"customer_id": customer_id, "status": current.status.value, "abnormal_streak": current.abnormal_streak, "version": current.version, "last_outbound_at": current.last_outbound_at}
+
+    @app.get("/sessions/{customer_id}/history")
+    def history(
+        customer_id: str,
+        x_actor_role: str | None = Header(default=None, alias="X-Actor-Role"),
+        x_human_token: str | None = Header(default=None, alias="X-Human-Token"),
+    ):
+        configured_token = os.getenv("HUMAN_REACTIVATE_TOKEN", "")
+        if not configured_token or x_actor_role not in {"human_agent", "admin"} or not x_human_token:
+            raise HTTPException(status_code=401, detail="human actor credentials are required")
+        if not hmac.compare_digest(x_human_token, configured_token):
+            raise HTTPException(status_code=403, detail="invalid human actor token")
+        service._validate_identifier(customer_id, "customer_id")
+        return {"customer_id": customer_id, "messages": store.get_history_records(customer_id)}
 
     return app
 

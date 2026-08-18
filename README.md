@@ -40,6 +40,10 @@ uvicorn app.main:app --reload
 
 应用会读取项目根目录 `.env`，已存在的系统环境变量优先。Swagger：[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)。
 
+启动后直接打开 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)，即可使用内置 Web Console。它是同源静态页面，不需要单独启动 Node/Vite：左侧切换 `customer_id`，中间发送客户消息，右侧查看会话状态、异常连续次数、最终动作和策略原因。
+
+第一次使用人工能力时，点击左下角“人工凭据”，填入 `.env` 中的 `HUMAN_REACTIVATE_TOKEN`、任意人工 `Actor ID` 和 `human_agent`/`admin` 角色。凭据只保存在当前浏览器会话；消息发送本身不要求人工 token。发送失败时，消息气泡中的重试按钮会复用相同 `message_id`，可安全重试。
+
 不要把真实 API Key 写入源码、README 或 Git。`GEMINI_API_KEY` 只从环境变量/.env 读取；如果密钥曾经粘贴到聊天、Issue 或提交记录，应立即撤销并重新生成。人工恢复还需要配置 `HUMAN_REACTIVATE_TOKEN`。
 
 没有 API Key 时可以运行离线流程演示：
@@ -55,6 +59,7 @@ python -m app.main --demo
 ```text
 POST /sessions/{customer_id}/messages
 GET  /sessions/{customer_id}       # 需要 X-Actor-Role / X-Human-Token
+GET  /sessions/{customer_id}/history # 需要 X-Actor-Role / X-Human-Token
 POST /sessions/{customer_id}/reactivate  # 需要 X-Actor-Id / X-Actor-Role / X-Human-Token
 GET  /health
 ```
@@ -106,7 +111,8 @@ app/llm.py          Gemini REST 结构化客户端和 Demo provider
 app/gateway.py      ReplyValidator、限流、OutboundProvider 与本地 outbox 出口
 app/service.py      对话用例和人工重新激活
 app/workflow.py     LangGraph 入口适配
-app/main.py         FastAPI、Swagger、终端演示
+app/main.py         FastAPI、Swagger、Web Console、终端演示
+app/static/         同源聊天界面（HTML/CSS/JavaScript）
 tests/              状态机、限流、并发、幂等和对抗测试
 docs/               threat model 与攻击场景
 ```

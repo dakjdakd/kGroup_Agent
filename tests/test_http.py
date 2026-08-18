@@ -43,3 +43,17 @@ def test_session_read_requires_human_credentials(monkeypatch):
     assert client.get("/sessions/c1").status_code == 401
     response = client.get("/sessions/c1", headers={"X-Actor-Role": "human_agent", "X-Human-Token": "test-token"})
     assert response.status_code == 200
+
+
+def test_frontend_and_history_endpoint_are_available(monkeypatch):
+    monkeypatch.setenv("HUMAN_REACTIVATE_TOKEN", "test-token")
+    service = ConversationService(SQLiteStore(":memory:"), DemoLLM())
+    client = TestClient(create_app(service))
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "Guarded Lead Agent" in page.text
+    assert client.get("/sessions/c1/history").status_code == 401
+    response = client.get("/sessions/c1/history", headers={"X-Actor-Role": "human_agent", "X-Human-Token": "test-token"})
+    assert response.status_code == 200
+    assert response.json()["messages"] == []
