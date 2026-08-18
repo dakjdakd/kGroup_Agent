@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import uuid
 import threading
-from collections import defaultdict
 from typing import Protocol
+from weakref import WeakValueDictionary
 
 from .domain import ActionType, ConversationResult, IntentDecision, PolicyEngine, SessionStatus, is_abnormal
 from .gateway import ActionGateway, SAFE_REPLY
@@ -23,8 +23,18 @@ class ConversationService:
         self.llm = llm
         self.gateway = gateway or ActionGateway(store)
         self.policy = policy or PolicyEngine()
-        self._customer_locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
+        # Weak values prevent attacker-controlled customer IDs from growing this map forever.
+        self._customer_locks: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
+        self._customer_locks_guard = threading.Lock()
         self.processing_timeout_seconds = 120.0
+
+    def _customer_lock(self, customer_id: str) -> threading.RLock:
+        with self._customer_locks_guard:
+            lock = self._customer_locks.get(customer_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._customer_locks[customer_id] = lock
+            return lock
 
     @staticmethod
     def _validate_identifier(value: str, field: str) -> None:
@@ -38,7 +48,7 @@ class ConversationService:
         self._validate_identifier(message_id, "message_id")
         if not text or not text.strip():
             raise ValueError("text must be non-empty")
-        with self._customer_locks[customer_id]:
+        with self._customer_lock(customer_id):
             trace_id = str(uuid.uuid4())
             session = self.store.get_session(customer_id)
             claim = self.store.claim_message(message_id, customer_id, text, self.processing_timeout_seconds)
@@ -118,7 +128,7 @@ class ConversationService:
         self._validate_identifier(actor_id, "actor_id")
         if actor_role not in {"human_agent", "admin"}:
             raise PermissionError("human_agent or admin role required")
-        with self._customer_locks[customer_id]:
+        with self._customer_lock(customer_id):
             session = self.store.get_session(customer_id)
             previous = session.status
             session.status = SessionStatus.ACTIVE
