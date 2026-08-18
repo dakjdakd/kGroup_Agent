@@ -5,7 +5,7 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .domain import SessionStatus
@@ -61,8 +61,24 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/sessions/{customer_id}/reactivate")
-    def reactivate(customer_id: str):
-        return {"customer_id": customer_id, "status": service.reactivate(customer_id).value}
+    def reactivate(
+        customer_id: str,
+        x_actor_id: str | None = Header(default=None, alias="X-Actor-Id"),
+        x_actor_role: str | None = Header(default=None, alias="X-Actor-Role"),
+        x_human_token: str | None = Header(default=None, alias="X-Human-Token"),
+    ):
+        configured_token = os.getenv("HUMAN_REACTIVATE_TOKEN", "")
+        if not configured_token or not x_actor_id or not x_actor_role or not x_human_token:
+            raise HTTPException(status_code=401, detail="human actor credentials are required")
+        if x_human_token != configured_token:
+            raise HTTPException(status_code=403, detail="invalid human actor token")
+        try:
+            status = service.reactivate(customer_id, x_actor_id, x_actor_role)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"customer_id": customer_id, "status": status.value, "actor_id": x_actor_id}
 
     @app.get("/sessions/{customer_id}")
     def session(customer_id: str):

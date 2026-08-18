@@ -44,8 +44,12 @@ class GeminiClient:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read())
-            return payload["candidates"][0]["content"]["parts"][0]["text"]
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, IndexError, json.JSONDecodeError) as exc:
+            generated = payload["candidates"][0]["content"]["parts"][0]["text"]
+            if not isinstance(generated, str) or not generated.strip():
+                raise ValueError("empty Gemini text response")
+            return generated
+        except Exception as exc:
+            # Keep every provider/network/shape failure on the retryable LLM boundary.
             raise LLMError(f"Gemini request failed: {exc}") from exc
 
     def classify(self, message: str, history: list[dict[str, str]] | None = None) -> IntentDecision:

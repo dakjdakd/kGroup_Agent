@@ -8,6 +8,7 @@ from typing import Protocol
 
 from .domain import ActionType, ConversationResult, IntentDecision, PolicyEngine, SessionStatus, is_abnormal
 from .gateway import ActionGateway, SAFE_REPLY
+from .llm import LLMError
 from .storage import SQLiteStore
 
 
@@ -23,15 +24,28 @@ class ConversationService:
         self.gateway = gateway or ActionGateway(store)
         self.policy = policy or PolicyEngine()
         self._customer_locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
+        self.processing_timeout_seconds = 120.0
+
+    @staticmethod
+    def _validate_identifier(value: str, field: str) -> None:
+        if not value or not value.strip():
+            raise ValueError(f"{field} must be non-empty")
+        if len(value) > 128 or any(ord(char) < 32 for char in value):
+            raise ValueError(f"{field} must be at most 128 characters and contain no control characters")
 
     def handle_message(self, customer_id: str, message_id: str, text: str) -> ConversationResult:
-        if not customer_id.strip() or not message_id.strip() or not text.strip():
-            raise ValueError("customer_id, message_id and text must be non-empty")
+        self._validate_identifier(customer_id, "customer_id")
+        self._validate_identifier(message_id, "message_id")
+        if not text or not text.strip():
+            raise ValueError("text must be non-empty")
         with self._customer_locks[customer_id]:
             trace_id = str(uuid.uuid4())
             session = self.store.get_session(customer_id)
-            if not self.store.add_message(message_id, customer_id, "inbound", text):
-                event = self.store.find_event_for_message(message_id)
+            claim = self.store.claim_message(message_id, customer_id, text, self.processing_timeout_seconds)
+            if claim.state == "conflict":
+                raise ValueError("message_id already exists for this customer with different text")
+            if claim.state != "claimed":
+                event = self.store.find_event_for_message(customer_id, message_id)
                 if event:
                     payload = json.loads(event.get("payload") or "{}")
                     action = payload.get("final_action", event["action_type"])
@@ -48,49 +62,62 @@ class ConversationService:
                         rate_limited=bool(payload.get("rate_limited", False)),
                         reason="idempotent_replay",
                     )
-                # Another worker committed the inbound id before its decision/event.
-                # Do not process the same message a second time; the first worker owns it.
                 return ConversationResult(
                     trace_id=trace_id, customer_id=customer_id, message_id=message_id,
                     action="silent", reply=None, intent=None, unhappy=None,
                     abnormal_streak=session.abnormal_streak, session_status=session.status,
-                    reason="idempotent_in_progress",
+                    reason="idempotent_in_progress" if claim.state == "processing" else "idempotent_replay",
                 )
-            if session.status is not SessionStatus.ACTIVE:
-                action_id = str(uuid.uuid4())
-                self.store.add_event(
-                    action_id, customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
-                    {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak},
+            try:
+                if session.status is not SessionStatus.ACTIVE:
+                    action_id = str(uuid.uuid4())
+                    self.store.add_event(
+                        action_id, customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
+                        {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak},
+                    )
+                    self.store.mark_message_completed(customer_id, message_id)
+                    return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action="silent", reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="terminal_session_silent")
+
+                decision = self.llm.classify(text, self.store.get_history(customer_id))
+                session = self.store.apply_abnormal_signal(customer_id, is_abnormal(decision))
+                if session.status is not SessionStatus.ACTIVE:
+                    self.store.add_event(
+                        str(uuid.uuid4()), customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
+                        {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak, "intent": decision.intent.value, "unhappy": decision.unhappy, "confidence": decision.confidence},
+                    )
+                    self.store.mark_message_completed(customer_id, message_id)
+                    return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason="terminal_session_silent")
+                policy = self.policy.decide(session, decision)
+                if policy.action is None:
+                    self.store.add_event(str(uuid.uuid4()), customer_id, message_id, "silent", "executed", policy.reason, trace_id, {"final_action": "silent", "intent": decision.intent.value, "confidence": decision.confidence})
+                    self.store.mark_message_completed(customer_id, message_id)
+                    return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason=policy.reason)
+
+                reply = None
+                if policy.action is ActionType.REPLY:
+                    reply = SAFE_REPLY if policy.safe_reply else self.llm.draft_reply(text, decision)
+                result_action, result_reply, rate_limited = self.gateway.execute(
+                    session,
+                    policy.action,
+                    message_id,
+                    trace_id,
+                    reply,
+                    policy.reason,
+                    {"intent": decision.intent.value, "unhappy": decision.unhappy, "confidence": decision.confidence, "risk_flags": [flag.value for flag in decision.risk_flags]},
                 )
-                return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action="silent", reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="terminal_session_silent")
+                self.store.mark_message_completed(customer_id, message_id)
+                return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
+            except Exception as exc:
+                self.store.mark_message_failed(customer_id, message_id, str(exc))
+                if isinstance(exc, LLMError):
+                    raise
+                raise LLMError(f"conversation processing failed: {exc}") from exc
 
-            decision = self.llm.classify(text, self.store.get_history(customer_id))
-            session = self.store.apply_abnormal_signal(customer_id, is_abnormal(decision))
-            if session.status is not SessionStatus.ACTIVE:
-                self.store.add_event(
-                    str(uuid.uuid4()), customer_id, message_id, "silent", "blocked", "terminal_session_silent", trace_id,
-                    {"final_action": "silent", "session_status": session.status.value, "abnormal_streak": session.abnormal_streak},
-                )
-                return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason="terminal_session_silent")
-            policy = self.policy.decide(session, decision)
-            if policy.action is None:
-                return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason=policy.reason)
-
-            reply = None
-            if policy.action is ActionType.REPLY:
-                reply = SAFE_REPLY if policy.safe_reply else self.llm.draft_reply(text, decision)
-            result_action, result_reply, rate_limited = self.gateway.execute(
-                session,
-                policy.action,
-                message_id,
-                trace_id,
-                reply,
-                policy.reason,
-                {"intent": decision.intent.value, "unhappy": decision.unhappy, "risk_flags": [flag.value for flag in decision.risk_flags]},
-            )
-            return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
-
-    def reactivate(self, customer_id: str) -> SessionStatus:
+    def reactivate(self, customer_id: str, actor_id: str, actor_role: str) -> SessionStatus:
+        self._validate_identifier(customer_id, "customer_id")
+        self._validate_identifier(actor_id, "actor_id")
+        if actor_role not in {"human_agent", "admin"}:
+            raise PermissionError("human_agent or admin role required")
         with self._customer_locks[customer_id]:
             session = self.store.get_session(customer_id)
             previous = session.status
@@ -101,6 +128,6 @@ class ConversationService:
             trace_id = str(uuid.uuid4())
             self.store.add_event(
                 str(uuid.uuid4()), customer_id, None, "human_reactivate", "executed", "controlled_human_reactivation", trace_id,
-                {"from_status": previous.value, "to_status": session.status.value},
+                {"from_status": previous.value, "to_status": session.status.value, "actor_id": actor_id, "actor_role": actor_role},
             )
             return session.status

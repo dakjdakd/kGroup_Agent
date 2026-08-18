@@ -23,3 +23,15 @@ def test_sqlite_limiter_is_atomic_for_competing_threads():
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda i: limiter.allow("c", str(i), now=100.0), range(8)))
     assert sum(results) == 1
+
+
+def test_session_creation_is_safe_across_independent_connections(tmp_path):
+    db_path = str(tmp_path / "shared.db")
+    stores = [SQLiteStore(db_path), SQLiteStore(db_path)]
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        sessions = list(pool.map(lambda store: store.get_session("new-customer"), stores))
+    assert [session.customer_id for session in sessions] == ["new-customer", "new-customer"]
+    for store in stores:
+        store.close()

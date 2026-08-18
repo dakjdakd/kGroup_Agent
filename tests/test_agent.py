@@ -4,7 +4,7 @@ import concurrent.futures
 
 from app.domain import ActionType, Intent, IntentDecision, SessionStatus
 from app.gateway import ActionGateway
-from app.llm import DemoLLM
+from app.llm import DemoLLM, LLMError
 from app.service import ConversationService
 from app.storage import SQLiteStore
 
@@ -91,7 +91,56 @@ def test_human_reactivation_is_explicit():
     service.handle_message("c1", "m1", "偏题")
     service.handle_message("c1", "m2", "偏题")
     assert service.handle_message("c1", "m3", "继续").action == "silent"
-    assert service.reactivate("c1") is SessionStatus.ACTIVE
+    assert service.reactivate("c1", "agent-1", "human_agent") is SessionStatus.ACTIVE
+
+
+def test_message_id_is_scoped_to_customer_and_replayed_safely():
+    store = SQLiteStore(":memory:")
+    service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED), decision(Intent.NEEDS_MORE_INFO)]))
+    first = service.handle_message("customer-a", "shared", "你好")
+    second = service.handle_message("customer-b", "shared", "你好")
+    assert first.customer_id == "customer-a"
+    assert second.customer_id == "customer-b"
+    assert second.reason != "idempotent_replay"
+
+
+def test_same_customer_message_id_with_different_text_is_rejected():
+    store = SQLiteStore(":memory:")
+    service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED)]))
+    service.handle_message("c1", "m1", "第一版")
+    import pytest
+    with pytest.raises(ValueError, match="different text"):
+        service.handle_message("c1", "m1", "篡改后的文本")
+
+
+def test_llm_failure_marks_message_retryable():
+    class FailingOnce(QueueLLM):
+        def __init__(self):
+            super().__init__([decision(Intent.INTERESTED)])
+            self.failed = False
+
+        def classify(self, message, history=None):
+            if not self.failed:
+                self.failed = True
+                raise LLMError("temporary timeout")
+            return super().classify(message, history)
+
+    store = SQLiteStore(":memory:")
+    service = ConversationService(store, FailingOnce())
+    import pytest
+    with pytest.raises(LLMError):
+        service.handle_message("c1", "retry-me", "你好")
+    result = service.handle_message("c1", "retry-me", "你好")
+    assert result.action == "reply"
+
+
+def test_low_confidence_rejection_does_not_close_session():
+    store = SQLiteStore(":memory:")
+    low = IntentDecision(intent=Intent.EXPLICITLY_REJECTED, unhappy=False, confidence=0.1, reason_code="uncertain", risk_flags=[ ], action_candidate=ActionType.MARK_NOT_INTERESTED)
+    service = ConversationService(store, QueueLLM([low]))
+    result = service.handle_message("c1", "m1", "可能不用")
+    assert result.action == "schedule_followup"
+    assert result.session_status is SessionStatus.ACTIVE
 
 
 def test_concurrent_outbound_is_limited():

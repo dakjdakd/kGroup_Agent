@@ -4,11 +4,17 @@ import json
 import sqlite3
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .domain import Session, SessionStatus
+
+
+@dataclass(frozen=True)
+class MessageClaim:
+    state: str  # claimed, completed, processing, conflict
+    content: str | None = None
 
 
 class SQLiteStore:
@@ -28,8 +34,11 @@ class SQLiteStore:
               last_outbound_at REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS messages (
-              message_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL,
-              direction TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL
+              customer_id TEXT NOT NULL, message_id TEXT NOT NULL,
+              direction TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL,
+              status TEXT NOT NULL DEFAULT 'processing',
+              processing_started_at REAL, completed_at REAL, failure_reason TEXT,
+              PRIMARY KEY (customer_id, message_id)
             );
             CREATE TABLE IF NOT EXISTS events (
               action_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL,
@@ -41,23 +50,110 @@ class SQLiteStore:
             );
             """
         )
+        self._migrate_messages_table_if_needed()
         self._conn.commit()
 
+    def _migrate_messages_table_if_needed(self) -> None:
+        """Upgrade the original global-message-id table in place for local databases."""
+        columns = self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        names = {row[1] for row in columns}
+        pk_columns = [row[1] for row in columns if row[5]]
+        if pk_columns == ["message_id"] or "status" not in names:
+            self._conn.execute("ALTER TABLE messages RENAME TO messages_legacy")
+            self._conn.execute(
+                """
+                CREATE TABLE messages (
+                  customer_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                  direction TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'completed',
+                  processing_started_at REAL, completed_at REAL, failure_reason TEXT,
+                  PRIMARY KEY (customer_id, message_id)
+                )
+                """
+            )
+            legacy_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(messages_legacy)").fetchall()}
+            status_expr = "'completed'" if "status" not in legacy_columns else "COALESCE(status, 'completed')"
+            self._conn.execute(
+                f"""INSERT OR IGNORE INTO messages
+                    (customer_id, message_id, direction, content, created_at, status)
+                    SELECT customer_id, message_id, direction, content, created_at, {status_expr}
+                    FROM messages_legacy"""
+            )
+            self._conn.execute("DROP TABLE messages_legacy")
     def get_session(self, customer_id: str) -> Session:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM sessions WHERE customer_id = ?", (customer_id,)).fetchone()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = time.time()
+                self._conn.execute(
+                    "INSERT INTO sessions (customer_id, status, abnormal_streak, version, last_outbound_at, created_at, updated_at) "
+                    "VALUES (?, ?, 0, 0, NULL, ?, ?) ON CONFLICT(customer_id) DO NOTHING",
+                    (customer_id, SessionStatus.ACTIVE.value, now, now),
+                )
+                row = self._conn.execute("SELECT * FROM sessions WHERE customer_id = ?", (customer_id,)).fetchone()
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
             if row:
                 values = dict(row)
                 values["status"] = SessionStatus(values["status"])
                 return Session(**values)
-            now = time.time()
-            session = Session(customer_id=customer_id, created_at=now, updated_at=now)
+
+    def claim_message(self, message_id: str, customer_id: str, content: str, processing_timeout: float = 120.0) -> MessageClaim:
+        """Atomically claim a message, or report completed/in-progress/conflicting work."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT content, status, processing_started_at FROM messages WHERE customer_id=? AND message_id=?",
+                    (customer_id, message_id),
+                ).fetchone()
+                if row is None:
+                    now = time.time()
+                    self._conn.execute(
+                        "INSERT INTO messages (customer_id, message_id, direction, content, created_at, status, processing_started_at) VALUES (?, ?, 'inbound', ?, ?, 'processing', ?)",
+                        (customer_id, message_id, content, now, now),
+                    )
+                    self._conn.commit()
+                    return MessageClaim("claimed", content)
+                if row["content"] != content:
+                    self._conn.commit()
+                    return MessageClaim("conflict", row["content"])
+                status = row["status"]
+                started = row["processing_started_at"] or 0.0
+                if status == "completed":
+                    self._conn.commit()
+                    return MessageClaim("completed", row["content"])
+                if status == "processing" and time.time() - started <= processing_timeout:
+                    self._conn.commit()
+                    return MessageClaim("processing", row["content"])
+                now = time.time()
+                self._conn.execute(
+                    "UPDATE messages SET status='processing', processing_started_at=?, failure_reason=NULL WHERE customer_id=? AND message_id=?",
+                    (now, customer_id, message_id),
+                )
+                self._conn.commit()
+                return MessageClaim("claimed", row["content"])
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def mark_message_completed(self, customer_id: str, message_id: str) -> None:
+        with self._lock:
             self._conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (customer_id, session.status.value, 0, 0, None, now, now),
+                "UPDATE messages SET status='completed', completed_at=?, failure_reason=NULL WHERE customer_id=? AND message_id=?",
+                (time.time(), customer_id, message_id),
             )
             self._conn.commit()
-            return session
+
+    def mark_message_failed(self, customer_id: str, message_id: str, reason: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE messages SET status='failed', failure_reason=? WHERE customer_id=? AND message_id=?",
+                (reason[:500], customer_id, message_id),
+            )
+            self._conn.commit()
 
     def save_session(self, session: Session) -> None:
         with self._lock:
@@ -128,7 +224,7 @@ class SQLiteStore:
     def add_message(self, message_id: str, customer_id: str, direction: str, content: str) -> bool:
         with self._lock:
             try:
-                self._conn.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?)", (message_id, customer_id, direction, content, time.time()))
+                self._conn.execute("INSERT INTO messages (customer_id, message_id, direction, content, created_at, status, completed_at) VALUES (?, ?, ?, ?, ?, 'completed', ?)", (customer_id, message_id, direction, content, time.time(), time.time()))
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:
@@ -171,9 +267,9 @@ class SQLiteStore:
                 self._conn.rollback()
                 raise
 
-    def find_event_for_message(self, message_id: str) -> dict[str, Any] | None:
+    def find_event_for_message(self, customer_id: str, message_id: str) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM events WHERE message_id=? ORDER BY created_at DESC LIMIT 1", (message_id,)).fetchone()
+            row = self._conn.execute("SELECT * FROM events WHERE customer_id=? AND message_id=? ORDER BY created_at DESC LIMIT 1", (customer_id, message_id)).fetchone()
             return dict(row) if row else None
 
     def close(self) -> None:

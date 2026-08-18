@@ -123,6 +123,8 @@ class PolicyEngine:
         if any(flag is not RiskFlag.NONE for flag in decision.risk_flags):
             return PolicyDecision(action=ActionType.REPLY, reason="sensitive_request_safe_template", safe_reply=True)
         if decision.intent is Intent.EXPLICITLY_REJECTED:
+            if decision.confidence < 0.6:
+                return PolicyDecision(action=ActionType.SCHEDULE_FOLLOWUP, reason="low_confidence_rejection")
             return PolicyDecision(action=ActionType.MARK_NOT_INTERESTED, reason="explicit_rejection")
         if decision.intent in (Intent.INTERESTED, Intent.NEEDS_MORE_INFO, Intent.OFF_TOPIC):
             return PolicyDecision(action=ActionType.REPLY, reason=f"intent_{decision.intent.value}")

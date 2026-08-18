@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 import re
-from typing import Any
+from typing import Any, Protocol
 
 from .domain import ActionType, Session, SessionStatus, can_transition
 from .rate_limit import RateLimiter, SQLiteRateLimiter
@@ -11,6 +11,20 @@ from .storage import SQLiteStore
 
 
 SAFE_REPLY = "我可以继续介绍公开的产品信息。如果你有具体需求，我可以先帮你整理，再由工作人员确认。"
+
+
+class OutboundProvider(Protocol):
+    """Provider boundary for a real IM/CRM connector; the demo uses a local outbox."""
+
+    def send(self, customer_id: str, text: str, idempotency_key: str) -> bool: ...
+
+
+class SQLiteOutboxProvider:
+    def __init__(self, store: SQLiteStore) -> None:
+        self.store = store
+
+    def send(self, customer_id: str, text: str, idempotency_key: str) -> bool:
+        return self.store.add_message(idempotency_key, customer_id, "outbound", text)
 
 
 class ReplyValidator:
@@ -31,10 +45,11 @@ class ReplyValidator:
 class ActionGateway:
     """Single side-effect boundary. No caller can bypass state or rate checks."""
 
-    def __init__(self, store: SQLiteStore, validator: ReplyValidator | None = None, rate_limiter: RateLimiter | None = None) -> None:
+    def __init__(self, store: SQLiteStore, validator: ReplyValidator | None = None, rate_limiter: RateLimiter | None = None, outbound_provider: OutboundProvider | None = None) -> None:
         self.store = store
         self.validator = validator or ReplyValidator()
         self.rate_limiter = rate_limiter or SQLiteRateLimiter(store)
+        self.outbound_provider = outbound_provider or SQLiteOutboxProvider(store)
 
     def execute(
         self,
@@ -68,9 +83,11 @@ class ActionGateway:
             if not self.store.commit_reply(session.customer_id, sent_at):
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_before_send", trace_id, {**metadata, "final_action": "silent"})
                 return "silent", None, False
+            if not self.outbound_provider.send(session.customer_id, reply, action_id):
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "outbound_provider_rejected", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": False})
+                return "schedule_followup", None, False
             session.last_outbound_at = sent_at
             session.version += 1
-            self.store.add_message(action_id, session.customer_id, "outbound", reply)
             self.store.add_event(
                 action_id, session.customer_id, message_id, action.value, "executed", reason, trace_id,
                 {**metadata, "reply": reply, "final_action": action.value, "abnormal_streak": session.abnormal_streak},
