@@ -97,6 +97,9 @@ class ActionGateway:
                 self.store.record_outbound_failure(action_id, session.customer_id, reply, "provider_rejected")
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "outbound_provider_rejected", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": False})
                 return "schedule_followup", None, False
+            # External providers do not necessarily write our conversation history;
+            # record the accepted reply idempotently for future LLM context.
+            self.store.add_message(action_id, session.customer_id, "outbound", reply)
             if not self.store.commit_reply(session.customer_id, sent_at):
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_after_send", trace_id, {**metadata, "final_action": "silent"})
                 return "silent", None, False

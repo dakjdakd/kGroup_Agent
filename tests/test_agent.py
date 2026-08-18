@@ -173,12 +173,35 @@ def test_provider_failure_is_not_recorded_as_outbound():
     store = SQLiteStore(":memory:")
     gateway = ActionGateway(store, outbound_provider=RejectingProvider())
     service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED)]), gateway=gateway)
-    result = service.handle_message("c1", "provider-fail", "你好")
-    assert result.action == "schedule_followup"
+    import pytest
+    with pytest.raises(LLMError, match="provider rejected"):
+        service.handle_message("c1", "provider-fail", "你好")
     assert store.get_history("c1") == [{"role": "user", "text": "你好"}]
     outbox = store._conn.execute("SELECT status FROM outbox").fetchall()
     assert [row[0] for row in outbox] == ["failed"]
     assert store._conn.execute("SELECT COUNT(*) FROM outbound_messages").fetchone()[0] == 0
+
+
+def test_provider_failure_can_retry_same_message_with_same_action_id():
+    class FlakyProvider:
+        def __init__(self):
+            self.calls = []
+
+        def send(self, customer_id, text, idempotency_key):
+            self.calls.append(idempotency_key)
+            return len(self.calls) > 1
+
+    store = SQLiteStore(":memory:")
+    provider = FlakyProvider()
+    gateway = ActionGateway(store, outbound_provider=provider)
+    service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED)]), gateway=gateway)
+    import pytest
+    with pytest.raises(LLMError):
+        service.handle_message("c1", "provider-retry", "你好")
+    result = service.handle_message("c1", "provider-retry", "你好")
+    assert result.action == "reply"
+    assert provider.calls[0] == provider.calls[1]
+    assert store.get_history("c1")[-1]["role"] == "assistant"
 
 
 def test_low_confidence_rejection_does_not_close_session():

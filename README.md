@@ -116,6 +116,7 @@ docs/               threat model 与攻击场景
 - Prompt Injection 和自然语言泄露无法承诺数学意义上的 100% 防御；当前方案通过最小权限、上下文隔离和输出审核降低风险。
 - `/reactivate` 现在要求人工 actor、角色和共享 token，并写入 actor 审计；生产环境仍应接入真正的 SSO/RBAC、短期凭证和 CSRF 防护。
 - `ActionGateway` 当前把通过策略和限流的回复写入 SQLite `outbox`：本地 provider 会标记为 `accepted`，失败会标记为 `failed`；它不是第三方 IM 的投递确认。接入真实平台时应实现带稳定 `action_id` 幂等键的 provider、`pending/sending/sent/retryable` worker 和发送状态回调。
+- provider 拒绝会让消息回到 `failed` 可重试状态；再次使用相同 `message_id` 时复用分类结果和 action id，并把成功回复补入本地对话历史。
 - claim token 是消息处理租约的 fencing token；租约过期后旧 worker 的完成/失败写入会被拒绝。跨进程部署仍应使用 PostgreSQL/Redis 等具备明确租约和队列能力的基础设施。
 - 消息采用 `(customer_id, message_id)` 幂等键，并记录 `processing/failed/completed` 状态；LLM 超时或非法输出会释放为可重试消息，避免永久卡死。
 - 服务层和 HTTP 层都限制客户文本不超过 5000 字符，ID 不超过 128 字符且禁止控制字符；SQLite 使用 `PRAGMA user_version` 标记当前 schema 版本。

@@ -127,6 +127,9 @@ class ConversationService:
                     {"intent": decision.intent.value, "unhappy": decision.unhappy, "confidence": decision.confidence, "risk_flags": [flag.value for flag in decision.risk_flags]},
                     claim_token=claim.claim_token,
                 )
+                event = self.store.find_event_for_message(customer_id, message_id)
+                if event and event["reason"] == "outbound_provider_rejected":
+                    raise LLMError("outbound provider rejected; message is retryable")
                 if not self.store.mark_message_completed(customer_id, message_id, claim.claim_token):
                     raise LLMError("message claim lost before completion")
                 return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
