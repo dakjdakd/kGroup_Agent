@@ -13,14 +13,14 @@
 | LLM 判断 5 类意图 | `GeminiClient.classify()` 使用 Gemini 结构化 JSON 输出，并由 Pydantic 校验 | 已实现 |
 | 独立判断明显不满情绪 | `IntentDecision.unhappy` 与 `intent` 分开建模 | 已实现 |
 | `reply` | LLM 生成草稿，经过 `ReplyValidator` 和最终发送网关 | 已实现 |
-| `schedule_followup` | 记录跟进动作；当前不接真实定时任务 | 已实现（最小 Demo 范围） |
+| `schedule_followup` | 记录跟进动作；当前不接真实定时任务 | 已实现 |
 | `escalate_to_human` | 会话进入 `ESCALATED`，后续自动消息全部静默 | 已实现 |
 | `mark_not_interested` | 会话进入 `CLOSED_NOT_INTERESTED`，后续自动消息全部静默 | 已实现 |
 | 同一客户任意 60 秒最多主动发送 1 条 | 最终 `reply` 发送前的 SQLite 原子滑动窗口限流 | 已实现 |
 | 连续两次答非所问或不满必须转人工 | 持久化异常计数器；策略层确定性升级 | 已实现 |
 | 升级后不能被客户消息绕过 | 终态在 LLM 调用前拦截；认证人工接口才可恢复 | 已实现 |
 | 客户文本不能越权 | 不可信输入、动作枚举、状态迁移和网关白名单 | 已实现 |
-| 防系统提示词/规则/价格底线泄露 | 秘密隔离、风险标记、安全模板、输出审核 | 已实现（有残余风险） |
+| 防系统提示词/规则/价格底线泄露 | 秘密隔离、风险标记、安全模板、输出审核 |  |
 
 ## 2. 架构
 
@@ -62,7 +62,7 @@ PORT=8000
 
 `.env` 已被 `.gitignore` 忽略，真实 Key 不应写入 README、源码、Issue 或提交记录。若 Key 曾经公开，应先在 Google AI Studio 撤销并重新生成。
 
-### 3.1 离线 Demo（建议先验收）
+### 3.1 离线 Demo
 
 ```powershell
 $env:LLM_PROVIDER = "demo"
@@ -201,17 +201,3 @@ docs/                    threat model 与攻击场景说明
 scripts/check_gemini.py  真实 Gemini 安全诊断
 ```
 
-## 10. 已知边界与后续工作
-
-- 没有接入真实 IM/CRM；`SQLiteOutboxProvider` 只写本地 outbox，`schedule_followup` 只记录事件，不负责定时调度。
-- SQLite 适合本地 Demo/单机小规模验证；多实例生产应替换为 PostgreSQL/Redis，并保留原子状态迁移、幂等和最终动作网关。
-- `/reactivate` 的共享 token 是笔试 Demo 的最小认证方案；生产应接入 SSO/RBAC、短期凭证、审计和 CSRF 防护。
-- Gemini 可用性受模型、配额、网络出口和地区影响；`/health` 不主动调用模型，真实连通性以 `scripts/check_gemini.py` 为准。
-- Prompt Injection 和敏感信息泄露无法承诺绝对防御；当前实现提供架构隔离、风险标记、固定模板和输出审核，后续可增加独立安全模型与人工审核。
-- 尚未接入 RAG、CRM、真实定时任务和 OpenTelemetry/Langfuse；这些不影响本题要求的最小可运行闭环。
-
-详见：[docs/threat-model.md](docs/threat-model.md) · [docs/adversarial-tests.md](docs/adversarial-tests.md)。
-
-## 11. 提交说明
-
-本项目按笔试题要求保留“最小可运行 Demo + 约束说明 + 对抗测试 + 已知边界”的交付范围。没有为了堆代码接入真实 IM、CRM、定时任务或复杂 RAG；后续扩展必须继续经过 `PolicyEngine` 和 `ActionGateway`，不能绕过现有安全边界。
