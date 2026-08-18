@@ -17,6 +17,9 @@ class SQLiteRateLimiter:
     def allow(self, customer_id: str, action_id: str, now: float | None = None) -> bool:
         return self.store.try_record_outbound(customer_id, action_id, time.time() if now is None else now)
 
+    def release(self, customer_id: str, action_id: str) -> None:
+        self.store.release_outbound_reservation(action_id)
+
 
 class InMemoryRateLimiter:
     """Offline implementation; process-local only. Use Redis for multiple workers."""

@@ -372,6 +372,12 @@ class SQLiteStore:
                 self._conn.rollback()
                 raise
 
+    def release_outbound_reservation(self, action_id: str) -> None:
+        """Release a rate-limit reservation when no provider delivery was accepted."""
+        with self._lock:
+            self._conn.execute("DELETE FROM outbound_messages WHERE action_id=?", (action_id,))
+            self._conn.commit()
+
     def find_event_for_message(self, customer_id: str, message_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM events WHERE customer_id=? AND message_id=? ORDER BY created_at DESC LIMIT 1", (customer_id, message_id)).fetchone()

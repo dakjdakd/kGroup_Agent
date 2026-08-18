@@ -89,6 +89,9 @@ class ActionGateway:
                 accepted = False
                 self.store.record_outbound_failure(action_id, session.customer_id, reply, str(exc))
             if not accepted:
+                release = getattr(self.rate_limiter, "release", None)
+                if release is not None:
+                    release(session.customer_id, action_id)
                 self.store.record_outbound_failure(action_id, session.customer_id, reply, "provider_rejected")
                 self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "outbound_provider_rejected", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": False})
                 return "schedule_followup", None, False

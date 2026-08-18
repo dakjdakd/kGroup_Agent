@@ -178,6 +178,7 @@ def test_provider_failure_is_not_recorded_as_outbound():
     assert store.get_history("c1") == [{"role": "user", "text": "你好"}]
     outbox = store._conn.execute("SELECT status FROM outbox").fetchall()
     assert [row[0] for row in outbox] == ["failed"]
+    assert store._conn.execute("SELECT COUNT(*) FROM outbound_messages").fetchone()[0] == 0
 
 
 def test_low_confidence_rejection_does_not_close_session():
