@@ -99,6 +99,47 @@ print(c.classify("我想了解你们的服务", []).model_dump_json())
 
 如果返回 `Gemini HTTP 400 ... User location is not supported`，说明 Google 当前拒绝了该网络出口/地区，并非项目读取 Key 失败；可更换允许 Gemini API 的网络出口或在 Google AI Studio 创建并配置可用项目后重试。不要把 Key 粘贴到聊天、Issue 或提交记录。
 
+也可以运行仓库自带的安全诊断脚本。它只输出是否读到 Key、Key 长度、模型和错误分类，不会输出 Key 或带 Key 的请求地址：
+
+```powershell
+python scripts/check_gemini.py
+```
+
+常见结果判定：
+
+| 输出分类 | 含义 | 处理方式 |
+|---|---|---|
+| `request: ok` | Key、模型、网络和 Gemini 请求均正常 | 继续进行完整流程验收 |
+| `region_blocked` | Google 拒绝当前网络出口/地区 | 更换允许 Gemini API 的网络出口，或使用可用地区的 Google AI Studio 项目和 Key |
+| `invalid_or_unauthorized_key` | Key 无效、已撤销或项目未授权 | 在 Google AI Studio 重新生成 Key，并确认启用了 Gemini API |
+| `model_or_endpoint_not_found` | 模型名或 API 地址不适用 | 检查 `GEMINI_MODEL` 与 `GEMINI_BASE_URL` |
+| `quota_or_rate_limited` | 配额、账单或频率限制 | 检查 Google 项目配额/账单并降低请求频率 |
+| `network_timeout` / `network_or_dns_error` | 本机代理、DNS 或防火墙问题 | 先验证能否访问 `generativelanguage.googleapis.com` |
+
+## 验收顺序
+
+建议按下面顺序验收，避免把外部 Gemini 故障误判成项目故障：
+
+```powershell
+# 1. 代码与单元测试
+pytest -q
+python -m compileall -q app tests
+node --check app/static/app.js
+
+# 2. 不依赖 Gemini 的完整 Web Console
+$env:LLM_PROVIDER = "demo"
+uvicorn app.main:app --reload --port 8000
+```
+
+浏览器打开 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)，确认 `/health` 显示“离线 Demo”，发送消息、刷新历史、打开人工凭据并执行人工恢复。关闭 Demo 终端后，重新打开一个终端并清除该临时变量：
+
+```powershell
+Remove-Item Env:LLM_PROVIDER -ErrorAction SilentlyContinue
+uvicorn app.main:app --reload --port 8000
+```
+
+此时 `/health` 应显示 `provider: gemini` 和 `llm_configured: true`；再运行 `python scripts/check_gemini.py`。只有诊断脚本返回 `request: ok`，才算真实 Gemini 链路验收通过。若返回 `region_blocked`，项目本身仍可正常运行，但真实模型功能受当前网络环境限制；可先用 Demo 完成其余流程验收。
+
 返回包含 `action`、`reply`、`intent`、`unhappy`、`abnormal_streak`、`session_status`、`rate_limited` 和 `trace_id`。
 
 ## 测试
