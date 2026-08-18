@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+import threading
+from collections import defaultdict
 from typing import Protocol
 
 from .domain import ActionType, ConversationResult, IntentDecision, PolicyEngine, SessionStatus, advance_streak
@@ -19,34 +21,37 @@ class ConversationService:
         self.llm = llm
         self.gateway = gateway or ActionGateway(store)
         self.policy = policy or PolicyEngine()
+        self._customer_locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
 
     def handle_message(self, customer_id: str, message_id: str, text: str) -> ConversationResult:
-        trace_id = str(uuid.uuid4())
-        session = self.store.get_session(customer_id)
-        if not self.store.add_message(message_id, customer_id, "inbound", text):
-            event = self.store.find_event_for_message(message_id)
-            if event:
-                return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action=event["action_type"], reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="idempotent_replay")
-        if session.status is not SessionStatus.ACTIVE:
-            return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action="silent", reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="terminal_session_silent")
+        with self._customer_locks[customer_id]:
+            trace_id = str(uuid.uuid4())
+            session = self.store.get_session(customer_id)
+            if not self.store.add_message(message_id, customer_id, "inbound", text):
+                event = self.store.find_event_for_message(message_id)
+                if event:
+                    return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action=event["action_type"], reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="idempotent_replay")
+            if session.status is not SessionStatus.ACTIVE:
+                return ConversationResult(trace_id=trace_id, customer_id=customer_id, message_id=message_id, action="silent", reply=None, intent=None, unhappy=None, abnormal_streak=session.abnormal_streak, session_status=session.status, reason="terminal_session_silent")
 
-        decision = self.llm.classify(text)
-        advance_streak(session, decision)
-        self.store.save_session(session)
-        policy = self.policy.decide(session, decision)
-        if policy.action is None:
-            return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason=policy.reason)
+            decision = self.llm.classify(text)
+            advance_streak(session, decision)
+            self.store.save_session(session)
+            policy = self.policy.decide(session, decision)
+            if policy.action is None:
+                return ConversationResult(trace_id, customer_id, message_id, "silent", None, decision.intent, decision.unhappy, session.abnormal_streak, session.status, reason=policy.reason)
 
-        reply = None
-        if policy.action is ActionType.REPLY:
-            reply = SAFE_REPLY if policy.safe_reply else self.llm.draft_reply(text, decision)
-        result_action, result_reply, rate_limited = self.gateway.execute(session, policy.action, message_id, trace_id, reply, policy.reason)
-        return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
+            reply = None
+            if policy.action is ActionType.REPLY:
+                reply = SAFE_REPLY if policy.safe_reply else self.llm.draft_reply(text, decision)
+            result_action, result_reply, rate_limited = self.gateway.execute(session, policy.action, message_id, trace_id, reply, policy.reason)
+            return ConversationResult(trace_id, customer_id, message_id, result_action, result_reply, decision.intent, decision.unhappy, session.abnormal_streak, session.status, rate_limited, policy.reason)
 
     def reactivate(self, customer_id: str) -> SessionStatus:
-        session = self.store.get_session(customer_id)
-        session.status = SessionStatus.ACTIVE
-        session.abnormal_streak = 0
-        session.version += 1
-        self.store.save_session(session)
-        return session.status
+        with self._customer_locks[customer_id]:
+            session = self.store.get_session(customer_id)
+            session.status = SessionStatus.ACTIVE
+            session.abnormal_streak = 0
+            session.version += 1
+            self.store.save_session(session)
+            return session.status
