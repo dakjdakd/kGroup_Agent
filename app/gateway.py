@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 import uuid
+import re
+from typing import Any
 
 from .domain import ActionType, Session, SessionStatus, can_transition
 from .rate_limit import RateLimiter, SQLiteRateLimiter
@@ -13,9 +15,17 @@ SAFE_REPLY = "我可以继续介绍公开的产品信息。如果你有具体需
 
 class ReplyValidator:
     def validate(self, text: str) -> bool:
-        lowered = text.lower()
-        forbidden = ("api_key", "system prompt", "系统提示词", "内部规则", "价格底线", "secret")
-        return bool(text.strip()) and len(text) <= 2000 and not any(token in lowered for token in forbidden)
+        lowered = text.casefold()
+        forbidden = (
+            "api_key", "system prompt", "developer message", "internal policy", "price floor",
+            "系统提示词", "内部规则", "价格底线", "secret", "密钥",
+        )
+        return (
+            bool(text.strip())
+            and len(text) <= 2000
+            and not any(token in lowered for token in forbidden)
+            and not re.search(r"(?:system|developer)\s*(?:prompt|message)|内部\s*(?:规则|提示)", lowered)
+        )
 
 
 class ActionGateway:
@@ -26,30 +36,61 @@ class ActionGateway:
         self.validator = validator or ReplyValidator()
         self.rate_limiter = rate_limiter or SQLiteRateLimiter(store)
 
-    def execute(self, session: Session, action: ActionType, message_id: str, trace_id: str, reply: str | None = None, reason: str = "") -> tuple[str, str | None, bool]:
+    def execute(
+        self,
+        session: Session,
+        action: ActionType,
+        message_id: str,
+        trace_id: str,
+        reply: str | None = None,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None, bool]:
         action_id = str(uuid.uuid4())
+        metadata = metadata or {}
+        try:
+            action = ActionType(action)
+        except (TypeError, ValueError):
+            self.store.add_event(action_id, session.customer_id, message_id, str(action), "blocked", "unknown_action", trace_id)
+            return "silent", None, False
         if session.status is not SessionStatus.ACTIVE or not can_transition(session.status, action):
             self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "terminal_session_or_invalid_transition", trace_id)
             return "silent", None, False
 
         if action is ActionType.REPLY:
             if not reply or not self.validator.validate(reply):
-                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "reply_validation_failed", trace_id)
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "reply_validation_failed", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": False})
                 return "schedule_followup", None, False
             if not self.rate_limiter.allow(session.customer_id, action_id, time.time()):
-                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "sliding_window_rate_limit", trace_id)
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "sliding_window_rate_limit", trace_id, {**metadata, "final_action": ActionType.SCHEDULE_FOLLOWUP.value, "rate_limited": True})
                 return "schedule_followup", None, True
-            session.last_outbound_at = time.time()
+            sent_at = time.time()
+            if not self.store.commit_reply(session.customer_id, sent_at):
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_before_send", trace_id, {**metadata, "final_action": "silent"})
+                return "silent", None, False
+            session.last_outbound_at = sent_at
             session.version += 1
-            self.store.save_session(session)
-            self.store.add_event(action_id, session.customer_id, message_id, action.value, "executed", reason, trace_id, {"reply": reply})
+            self.store.add_message(action_id, session.customer_id, "outbound", reply)
+            self.store.add_event(
+                action_id, session.customer_id, message_id, action.value, "executed", reason, trace_id,
+                {**metadata, "reply": reply, "final_action": action.value, "abnormal_streak": session.abnormal_streak},
+            )
             return action.value, reply, False
 
         if action is ActionType.ESCALATE_TO_HUMAN:
-            session.status = SessionStatus.ESCALATED
+            target_status = SessionStatus.ESCALATED
         elif action is ActionType.MARK_NOT_INTERESTED:
-            session.status = SessionStatus.CLOSED_NOT_INTERESTED
-        session.version += 1
-        self.store.save_session(session)
-        self.store.add_event(action_id, session.customer_id, message_id, action.value, "executed", reason, trace_id)
+            target_status = SessionStatus.CLOSED_NOT_INTERESTED
+        else:
+            target_status = None
+        if target_status is not None:
+            if not self.store.transition_session(session.customer_id, target_status):
+                self.store.add_event(action_id, session.customer_id, message_id, action.value, "blocked", "session_changed_before_transition", trace_id, {**metadata, "final_action": "silent"})
+                return "silent", None, False
+            session.status = target_status
+            session.version += 1
+        self.store.add_event(
+            action_id, session.customer_id, message_id, action.value, "executed", reason, trace_id,
+            {**metadata, "final_action": action.value, "abnormal_streak": session.abnormal_streak},
+        )
         return action.value, None, False

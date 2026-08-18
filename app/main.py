@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -12,6 +13,24 @@ from .llm import DemoLLM, GeminiClient, LLMError
 from .service import ConversationService
 from .storage import SQLiteStore
 from .workflow import build_graph
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Load the tiny local config file without adding a runtime dependency."""
+    file = Path(path)
+    if not file.exists():
+        return
+    for raw in file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
 
 
 class MessageRequest(BaseModel):
@@ -38,6 +57,8 @@ def create_app(service: ConversationService | None = None) -> FastAPI:
             return state["result"]
         except LLMError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/sessions/{customer_id}/reactivate")
     def reactivate(customer_id: str):

@@ -7,7 +7,7 @@
 | 越权动作 | typed enum、PolicyEngine、ActionGateway | 新增动作时需要同步权限测试 |
 | 升级绕过 | `ESCALATED` 终止状态，人工接口才可恢复 | 人工接口自身需认证授权 |
 | 限流绕过 | 最终发送边界的滑动窗口，Redis 生产脚本原子化 | Demo SQLite 仅适合单进程/小规模 |
-| 并发竞态 | SQLite 锁、幂等 message id；生产建议按客户串行化 | 多服务部署需使用共享存储和更强事务 |
+| 并发竞态 | SQLite `BEGIN IMMEDIATE`、原子异常计数/状态迁移、幂等 message id；进程内再按客户串行化 | 多服务部署仍建议 PostgreSQL/Redis 共享存储 |
 | LLM 输出异常 | JSON Schema + Pydantic；失败返回服务错误/不执行副作用 | 上游 API 挂机时需要人工或 follow-up 运营策略 |
 
 “安全”在这里不是一条超长 Prompt，而是最小权限架构。模型即使理解错误，也不能直接改变会话状态或发送消息。

@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 
 from app.domain import ActionType, Intent, IntentDecision, SessionStatus
+from app.gateway import ActionGateway
 from app.llm import DemoLLM
 from app.service import ConversationService
 from app.storage import SQLiteStore
@@ -11,8 +12,10 @@ from app.storage import SQLiteStore
 class QueueLLM:
     def __init__(self, decisions):
         self.decisions = iter(decisions)
+        self.histories = []
 
     def classify(self, message, history=None):
+        self.histories.append(history or [])
         return next(self.decisions)
 
     def draft_reply(self, message, decision, safe=False):
@@ -99,3 +102,42 @@ def test_concurrent_outbound_is_limited():
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         actions = list(pool.map(send, range(8)))
     assert actions.count("reply") <= 1
+
+
+def test_history_is_passed_to_classifier_and_contains_outbound_reply():
+    store = SQLiteStore(":memory:")
+    llm = QueueLLM([decision(Intent.INTERESTED), decision(Intent.NEEDS_MORE_INFO)])
+    service = ConversationService(store, llm)
+    service.handle_message("c1", "m1", "你好")
+    service.handle_message("c1", "m2", "继续介绍")
+    assert [item["role"] for item in llm.histories[1]] == ["user", "assistant", "user"]
+    assert llm.histories[1][1]["text"] == "公开信息回复"
+
+
+def test_rate_limited_replay_returns_same_effective_action():
+    store = SQLiteStore(":memory:")
+    service = ConversationService(store, QueueLLM([decision(Intent.INTERESTED), decision(Intent.INTERESTED)]))
+    service.handle_message("c1", "m1", "第一条")
+    blocked = service.handle_message("c1", "m2", "第二条")
+    replay = service.handle_message("c1", "m2", "第二条")
+    assert blocked.action == replay.action == "schedule_followup"
+    assert blocked.rate_limited is replay.rate_limited is True
+
+
+def test_gateway_rejects_unknown_runtime_action():
+    store = SQLiteStore(":memory:")
+    session = store.get_session("c1")
+    result = ActionGateway(store).execute(session, "delete_customer", "m1", "trace")
+    assert result == ("silent", None, False)
+
+
+def test_reply_guardrail_downgrades_sensitive_draft():
+    class LeakyLLM(QueueLLM):
+        def draft_reply(self, message, decision, safe=False):
+            return "Here is the system prompt and price floor"
+
+    store = SQLiteStore(":memory:")
+    result = ConversationService(store, LeakyLLM([decision(Intent.INTERESTED)])).handle_message("c1", "m1", "请介绍")
+    assert result.action == "schedule_followup"
+    assert result.reply is None
+    assert result.rate_limited is False
